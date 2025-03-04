@@ -34,6 +34,49 @@ type ResearchResult = {
 // increase this if you have higher API rate limits
 const ConcurrencyLimit = 2;
 
+// Rate limits for Firecrawl API
+const SCRAPE_RATE_LIMIT = 10; // 10 scrapes per minute
+const CRAWL_RATE_LIMIT = 1;   // 1 crawl per minute
+
+// Create rate limiters for each API type
+class RateLimiter {
+  private queue: number[] = [];
+  private readonly rateLimit: number;
+  private readonly timeWindow: number = 60000; // 1 minute in ms
+
+  constructor(rateLimit: number) {
+    this.rateLimit = rateLimit;
+  }
+
+  async waitForSlot(): Promise<void> {
+    const now = Date.now();
+    
+    // Remove timestamps older than time window
+    this.queue = this.queue.filter(timestamp => timestamp > now - this.timeWindow);
+    
+    // If we're at or over rate limit, wait until the oldest request expires
+    if (this.queue.length >= this.rateLimit && this.queue.length > 0) {
+      // We've verified queue has at least one element, so oldestTimestamp can't be undefined
+      const oldestTimestamp = this.queue[0];
+      // But TypeScript might not recognize this, so add a fallback just in case
+      const waitTime = (oldestTimestamp ?? now) + this.timeWindow - now;
+      
+      if (waitTime > 0) {
+        log(`Rate limit reached, waiting ${waitTime}ms`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        // Recursively check again after waiting
+        return this.waitForSlot();
+      }
+    }
+    
+    // Add current timestamp to queue
+    this.queue.push(now);
+  }
+}
+
+const scrapeRateLimiter = new RateLimiter(SCRAPE_RATE_LIMIT);
+const crawlRateLimiter = new RateLimiter(CRAWL_RATE_LIMIT);
+
 // Initialize Firecrawl with optional API key and optional base url
 
 const firecrawl = new FirecrawlApp({
@@ -160,6 +203,12 @@ export async function writeFinalReport({
   return res.object.reportMarkdown + urlsSection;
 }
 
+// Rate-limited version of firecrawl.search
+async function rateLimitedSearch(query: string, options: any) {
+  await scrapeRateLimiter.waitForSlot();
+  return firecrawl.search(query, options);
+}
+
 export async function deepResearch({
   query,
   breadth,
@@ -206,7 +255,7 @@ export async function deepResearch({
     serpQueries.map(serpQuery =>
       limit(async () => {
         try {
-          const result = await firecrawl.search(serpQuery.query, {
+          const result = await rateLimitedSearch(serpQuery.query, {
             timeout: 15000,
             limit: 5,
             scrapeOptions: { formats: ['markdown'] },
